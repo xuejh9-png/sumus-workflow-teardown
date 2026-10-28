@@ -1,0 +1,209 @@
+{
+  "meta": {
+    "target": "sumus.im",
+    "title": "Sumus workflow teardown (black-box)",
+    "date": "2026-10-28",
+    "scope": "workflow / architecture only, no source redistribution",
+    "tool": "REA rea-agents 6.5.0 (static bundle analysis over CDP, page JS never executed)",
+    "evidence_grade_legend": {
+      "measured": "obtained by calling the live API inside an authenticated session",
+      "static": "string/structure read from front-end bundle, not executed",
+      "inferred": "derived from the above, explicitly marked"
+    }
+  },
+
+  "capture": {
+    "browser": "Chrome 155.0.8059.86",
+    "scripts_loaded": 59,
+    "payload_mb": 5.1,
+    "scripts_parsed_statically": 52,
+    "parse_failures": 0,
+    "ast_nodes_visited": 1242824,
+    "completeness": "complete",
+    "evidence_ids": ["ev_ee0a0d2b...", "ev_29827610..."]
+  },
+
+  "stack": [
+    { "layer": "frontend", "value": "Next.js", "confidence": "high", "basis": "vendor_fingerprint", "grade": "static" },
+    { "layer": "frontend", "value": "React", "confidence": "medium", "basis": "vendor_fingerprint", "grade": "static" },
+    { "layer": "telemetry", "value": "Sentry", "basis": "sentry-trace / traceparent / baggage injection", "grade": "static" },
+    { "layer": "realtime", "value": "SSE (EventSource)", "basis": "new EventSource('/api/app/events')", "grade": "static" },
+    { "layer": "billing", "value": "Stripe", "basis": "GET /api/app/billing -> provider=stripe", "grade": "measured" },
+    { "layer": "model_gateway", "value": "OpenRouter", "basis": "model.provider in {openrouter, openrouter-latest}", "grade": "measured" }
+  ],
+
+  "endpoints": [
+    { "path": "/api/app/events", "method": "GET", "kind": "sse", "note": "single global event stream", "grade": "static" },
+    { "path": "/api/app/me", "method": "GET", "grade": "measured" },
+    { "path": "/api/app/agents", "method": "GET", "query": "workspace_id", "grade": "measured" },
+    { "path": "/api/app/models", "method": "GET", "grade": "measured" },
+    { "path": "/api/app/billing", "method": "GET", "grade": "measured" },
+    { "path": "/api/app/agent-marketplace", "method": "GET", "grade": "static" },
+    { "path": "/api/app/connector-servers", "method": "GET,POST", "grade": "measured" },
+    { "path": "/api/app/analytics/purchases", "method": "GET", "grade": "static" },
+    { "path": "/api/app/events", "method": "POST", "kind": "analytics_ingest", "grade": "static" },
+    { "path": "/api/auth", "method": "*", "grade": "static" }
+  ],
+
+  "routes": [
+    "/app/w/:workspaceId",
+    "/app/w/:workspaceId/agent-marketplace",
+    "/app/w/:workspaceId/connectors/open",
+    "/app/w/:workspaceId/connectors/done",
+    "/app/w/:workspaceId/members",
+    "/app/w/:workspaceId/members/:id",
+    "/app/w/:workspaceId/members/:id/settings",
+    "/app/w/:workspaceId/members/api",
+    "/app/w/:workspaceId/members/people/:userId",
+    "/app/w/:workspaceId/overview",
+    "/app/w/:workspaceId/scheduled"
+  ],
+
+  "agent_schema": {
+    "grade": "measured",
+    "fields": [
+      "id", "workspace_id", "callsign", "tagline", "description", "starter_prompts",
+      "avatar", "tags", "can_do", "cant_do",
+      "runtime_kind", "local_runtime_id", "local_agent_driver",
+      "model", "thinking_level", "monthly_budget_credits", "teammate_access",
+      "archived_at", "system_owned", "template_id", "created_by",
+      "created_at", "updated_at", "last_engaged_at", "can"
+    ],
+    "enums": {
+      "runtime_kind": ["cloud", "local"],
+      "can": ["edit", "delete", "talk", "view_sessions"]
+    },
+    "key_design_notes": [
+      "model is per-agent, not per-conversation; null means template default",
+      "teammate_access gates whether other agents can invoke this agent",
+      "monthly_budget_credits is a per-agent cost ceiling; null = unlimited",
+      "runtime_kind selects where the agent executes; local_agent_driver bridges Codex / Claude Code"
+    ]
+  },
+
+  "workflow_primitives": [
+    {
+      "id": "event_bus",
+      "evidence": "new EventSource('/api/app/events'); onopen -> post({type:'resync'}) on reconnect",
+      "grade": "static",
+      "why_it_matters": "one connection per client instead of one per conversation; reconnect triggers full resync"
+    },
+    {
+      "id": "turn_state_machine",
+      "events": ["turn_started", "message_delta", "turn_done", "turn_error", "stream_resuming"],
+      "carries": ["session_id"],
+      "grade": "static",
+      "why_it_matters": "turn is a first-class object: individually resumable, failurable, retryable"
+    },
+    {
+      "id": "group_model",
+      "events": ["group_message", "group_round"],
+      "fields": ["thread_root_id", "group_id"],
+      "grade": "static",
+      "why_it_matters": "group_round encodes 'several agents speak in one round' as a first-class event"
+    },
+    {
+      "id": "mention_guard",
+      "strings": ["group_mention_all", "mention_all_forbidden", "group_mentioned"],
+      "grade": "static",
+      "inference": "server rejects @all from agents; first line of defence against agent ping-pong loops",
+      "why_it_matters": "without a server-side guard, multi-agent systems deadlock in mention storms"
+    },
+    {
+      "id": "runtime_abstraction",
+      "strings": [
+        "runtime_pairing_hint", "runtime_reconnect_code_hint", "runtime_offline_count",
+        "runtime_waiting", "runtime_retry", "runtime_preparing",
+        "runtime_registration_failed", "runtime_command_label", "runtime_copied"
+      ],
+      "grade": "static",
+      "inference": "local agents register as runtimes via pairing codes; not a plain API proxy",
+      "why_it_matters": "lets heavy jobs run on the user's own machine while cloud agents orchestrate"
+    }
+  ],
+
+  "models": {
+    "grade": "measured",
+    "count": 21,
+    "providers": ["openrouter", "openrouter-latest"],
+    "list": [
+      "anthropic/claude-opus-5.5", "anthropic/claude-sonnet-5.5", "anthropic/claude-fable-5.1",
+      "anthropic/claude-haiku-5.5", "x-ai/grok-4.7", "openai/gpt-6-astra", "openai/gpt-6.1-sol",
+      "openai/gpt-6-luna", "openai/gpt-chat-latest", "openai/gpt-oss-120b",
+      "google/gemini-3.8-flash", "google/gemini-4-argon",
+      "deepseek/deepseek-v4.1-flash-1017", "deepseek/deepseek-v4-pro-0813", "deepseek/deepseek-v4-flash",
+      "z-ai/glm-5.3", "moonshotai/kimi-k3", "moonshotai/kimi-k2.7-code",
+      "qwen/qwen3.7-plus", "minimax/minimax-m3", "inception/mercury-3"
+    ]
+  },
+
+  "pricing": {
+    "grade": "measured",
+    "credits_per_usd": 200,
+    "plans": [
+      { "id": "free", "usd_month": 0, "usd_year": 0, "credits": 1000, "members": 3, "agents": 10 },
+      { "id": "plus", "usd_month": 24, "usd_year": 200, "credits": 3600, "members": 25, "agents": 300 },
+      { "id": "pro", "usd_month": 100, "usd_year": 1000, "credits": 15000, "members": 50, "agents": 100 },
+      { "id": "team", "usd_month": 15, "usd_year": 150, "credits": 2250, "members": null, "agents": 10 }
+    ],
+    "addon": { "usd_month": 20, "credits": 4000, "tiers": [4000, 10000, 20000, 40000, 100000] },
+    "rollover": false,
+    "note": "3600 credits ~= $18 at face value; the margin is subscription + add-ons, not model markup"
+  },
+
+  "marketplace": {
+    "grade": "static",
+    "agent_count": 24,
+    "agents": [
+      "科研助手", "文案润色师", "客户猎手", "实验分析师", "视频剪辑师", "增长搭子",
+      "家庭管家", "行政助理", "策略回测员", "个股调研员", "财报解读员", "异动盯盘员",
+      "行情晨报员", "交易复盘员", "策略审查员", "指标编写员", "文献研究员", "编程搭子",
+      "剪辑工作台", "约会策划师", "纽约家长助手", "广告守门员", "点子陪审员", "竞品哨兵"
+    ],
+    "observation": "roughly half are consumer-life roles, indicating a consumer 'AI family' positioning rather than pro teams"
+  },
+
+  "verdict": {
+    "copy": [
+      "single SSE channel + resync",
+      "turn state machine keyed by session_id",
+      "group_round + thread_root_id",
+      "server-side mention guard (max depth + per-round cap)",
+      "runtime_kind cloud/local split",
+      "per-agent monthly budget ceiling"
+    ],
+    "skip": [
+      "credit system and Stripe multi-tenancy",
+      "OpenRouter resale layer",
+      "consumer role templates",
+      "their UI specifics"
+    ],
+    "build_plan": {
+      "stack": "Python 3 stdlib (http.server + ThreadingHTTPServer + sqlite3 + hand-rolled SSE), single-page HTML/JS front end, OpenAI-compatible model API",
+      "v0_1_scope": [
+        "one group, multiple configurable agents (name/persona/model/prompt)",
+        "mention routing, multi-mention parallel dispatch",
+        "agent-to-agent delegation with server-side guard: max depth 2, max 5 calls per round",
+        "event bus + turn state machine + resync on reconnect",
+        "messages and turns persisted in SQLite",
+        "artifacts written to a working directory"
+      ],
+      "size_estimate_loc": { "backend": 600, "frontend": 400 }
+    }
+  },
+
+  "open_questions": [
+    "backend language and deployment shape unknown (only REST surface visible)",
+    "ordering rule inside group_round unverified",
+    "delegation recursion depth unverified; only the mention_all guard has direct evidence",
+    "concurrent turn limits and rate limiting unseen",
+    "cloud sandbox isolation strength (container vs VM) not observable externally"
+  ],
+
+  "boundary": {
+    "no_source_redistribution": true,
+    "no_prompt_or_brand_assets_copied": true,
+    "observed_only_inside_own_authenticated_account": true,
+    "no_permission_bypass": true
+  }
+}
